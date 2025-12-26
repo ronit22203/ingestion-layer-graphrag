@@ -1,0 +1,43 @@
+# Configuration for Medical Data Ingestion Pipeline
+# All paths are relative to the project root (parent of ingestion/ folder)
+
+# Project Structure
+project_root: "."
+input_dir: "data/raw"
+output_dir: "data/processed"
+log_file: "logs/ingestion.log"
+
+# Pipeline Stages
+pdf_to_markdown:
+  # Input is from input_dir
+  output_subdir: "data/interim"
+  # marker tool settings
+  batch_size: 10
+  verbose: true
+
+preprocessing:
+  input_dir: "data/interim"
+  output_dir: "data/processed"
+  tool_version: "marker+surya"
+  # Cleaning options
+  remove_page_markers: true
+  normalize_headings: true
+  fix_hyphenation: true
+
+vectorization:
+  input_dir: "data/cleaned"
+  # Qdrant settings
+  qdrant_url: "http://localhost:6333"
+  collection_name: "medical_papers"
+  model_name: "BAAI/bge-small-en-v1.5"
+  # Chunking settings
+  chunk_size: 1500 #Changed from 500
+  chunk_overlap: 300 #Changed from 100
+  headers_to_split: ["#", "##", "###"]
+  batch_size: 64
+
+# Virtual environment
+venv:
+  enabled: true
+  directory: ".venv"
+
