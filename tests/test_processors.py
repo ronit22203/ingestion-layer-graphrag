@@ -2,6 +2,7 @@
 """
 Test script for TextCleaner and MarkdownChunker
 """
+import json
 import sys
 from pathlib import Path
 
@@ -11,6 +12,7 @@ sys.path.insert(0, str(project_root))
 
 from src.processors.cleaner import TextCleaner
 from src.processors.chunker import MarkdownChunker
+from src.extractors.surya_converter import SuryaToMarkdown
 
 if __name__ == "__main__":
     import yaml
@@ -20,7 +22,42 @@ if __name__ == "__main__":
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     
-    # Load test markdown file from interim folder (as per settings.yaml)
+    # Step 1: Convert OCR JSON to Markdown (if OCR file exists in test_data)
+    print("="*60)
+    print("STEP 1: CONVERTING OCR JSON TO MARKDOWN")
+    print("="*60 + "\n")
+    
+    ocr_file = project_root / "tests" / "test_data" / "Sample-filled-in-MR_ocr.json"
+    intermediate_dir = project_root / config['pdf_to_markdown']['output_subdir']
+    intermediate_dir.mkdir(parents=True, exist_ok=True)
+    
+    if ocr_file.exists():
+        try:
+            with open(ocr_file, 'r', encoding='utf-8') as f:
+                ocr_data = json.load(f)
+            
+            converter = SuryaToMarkdown()
+            markdown_output = converter.convert(ocr_data)
+            
+            # Save to interim directory
+            md_output_file = intermediate_dir / (ocr_file.stem + ".md")
+            with open(md_output_file, 'w', encoding='utf-8') as f:
+                f.write(markdown_output)
+            
+            print(f"✓ Converted OCR JSON: {ocr_file.relative_to(project_root)}")
+            print(f"✓ Saved markdown to: {md_output_file.relative_to(project_root)}")
+            print(f"✓ Output size: {len(markdown_output)} characters\n")
+        except Exception as e:
+            print(f"✗ Error converting OCR: {e}\n")
+    else:
+        print(f"⚠ OCR file not found: {ocr_file}\n")
+    
+    # Step 2: Load markdown files for preprocessing
+    print("="*60)
+    print("STEP 2: LOADING MARKDOWN FILES")
+    print("="*60 + "\n")
+    
+    # Load test markdown file from preprocessing input_dir (as per settings.yaml)
     interim_dir = project_root / config['preprocessing']['input_dir']
     
     # Find the first .md file in interim folder
@@ -64,7 +101,7 @@ Treatment showed 50% improvement compared to placebo.
             sample_text = f.read()
     
     print("\n" + "="*60)
-    print("TESTING TEXT CLEANER")
+    print("STEP 3: TESTING TEXT CLEANER")
     print("="*60 + "\n")
     
     cleaner = TextCleaner()
@@ -77,8 +114,27 @@ Treatment showed 50% improvement compared to placebo.
     print(cleaned[:500])
     print("-" * 60)
     
+    # Step 4: Save cleaned markdown to preprocessing output_dir
     print("\n" + "="*60)
-    print("TESTING MARKDOWN CHUNKER")
+    print("STEP 4: SAVING CLEANED MARKDOWN")
+    print("="*60 + "\n")
+    
+    output_dir = project_root / config['preprocessing']['output_dir']
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    if md_file:
+        cleaned_output_file = output_dir / (md_file.stem + "_cleaned.md")
+    else:
+        cleaned_output_file = output_dir / "sample_cleaned.md"
+    
+    with open(cleaned_output_file, 'w', encoding='utf-8') as f:
+        f.write(cleaned)
+    
+    print(f"✓ Saved cleaned markdown to: {cleaned_output_file.relative_to(project_root)}")
+    print(f"✓ Cleaned file size: {len(cleaned)} characters\n")
+    
+    print("="*60)
+    print("STEP 5: TESTING MARKDOWN CHUNKER")
     print("="*60 + "\n")
     
     chunker = MarkdownChunker(max_tokens=512)
@@ -98,4 +154,4 @@ Treatment showed 50% improvement compared to placebo.
     if len(chunks) > 3:
         print(f"... and {len(chunks) - 3} more chunks")
     
-    print("\n✓ Processor tests completed!")
+    print("\n✓ All processor tests completed!")
