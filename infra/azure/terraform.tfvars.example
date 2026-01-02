@@ -1,0 +1,10 @@
+# Copy this file to terraform.tfvars and fill in your Azure details
+
+resource_group_name      = "mara-ingestion-prod"
+location                 = "East US"
+environment              = "production"
+storage_account_name     = "maraingestionprod"  # Must be unique globally
+cognitive_account_name   = "mara-vision-prod"
+container_registry_name  = "mararegistryprod"   # Must be unique globally
+app_service_plan_name    = "mara-pipeline-plan"
+app_service_name         = "mara-pipeline-prod"
