@@ -714,7 +714,3 @@ Built with:
 - [SentenceTransformers](https://www.sbert.net/) - Embedding generation
 - [Qdrant](https://qdrant.tech/) - Vector database
 - [marker-pdf](https://github.com/VikParuchuri/marker) - PDF to Markdown conversion
-
-## License
-
-Proprietary - Medical Data Ingestion Pipeline
