@@ -114,7 +114,8 @@ class MedicalVectorizer:
                 'source': file_path.name,
                 'context': chunk['context'],
                 'level': chunk['level'],
-                'chunk_index': i
+                'chunk_index': i,
+                'page_number': chunk.get('page_number', 1)
             }
             
             # Create Qdrant point

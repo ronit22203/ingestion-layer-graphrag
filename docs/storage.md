@@ -161,16 +161,28 @@ Qdrant points stored with structure:
         "source": "paper_title.md",
         "context": "Methods > Study Design",
         "level": 2,
-        "chunk_index": 5
+        "chunk_index": 5,
+        "page_number": 3  # NEW: Source page number
     }
 }
 ```
 
-Metadata enables:
-- Filtering by source document
-- Understanding chunk context
-- Ranking results by header level
-- Tracing back to original location
+**Payload Fields**:
+
+| Field | Type | Purpose | Example |
+|-------|------|---------|---------|
+| `source` | string | Original document filename | `"medical_report.md"` |
+| `context` | string | Hierarchical breadcrumb path | `"Clinical Findings > Test Results"` |
+| `level` | int | Header level (1-4) | `2` (##) |
+| `chunk_index` | int | Position of chunk in document | `5` |
+| `page_number` | int | Source page number (from PDF) | `3` |
+
+**Metadata enables**:
+- Filter results by source document
+- Understand semantic context
+- Rank results by header hierarchy
+- Trace back to original page number
+- Evaluate retrieval quality against ground truth
 
 ### Error Handling
 

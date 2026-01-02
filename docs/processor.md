@@ -2,14 +2,257 @@
 
 ## Overview
 
-The processing stage cleans and chunks Markdown documents with a focus on preserving semantic context. This stage consists of two components:
+The processing stage transforms raw OCR output into production-grade training data. It consists of **two distinct steps**:
 
-1. **TextCleaner** - Normalizes and cleans Markdown
-2. **MarkdownChunker** - Hierarchically splits documents while preserving context
+1. **Conversion** - OCR JSON → Markdown (Stage 2)
+2. **Cleaning** - Normalize Markdown (Stage 3)
+3. **Chunking** - Split into context-aware chunks (Stage 4)
 
-## TextCleaner
+Together these stages ensure data quality and semantic preservation.
 
-Located in `src/processors/cleaner.py`, this class removes artifacts from the extraction stage and normalizes text.
+---
+
+## Stage 2: Conversion (OCR JSON → Markdown)
+
+Located in `src/extractors/surya_converter.py`
+
+### Purpose
+Convert raw Surya OCR output (bounding boxes, text fragments) into a readable, structured Markdown document.
+
+### Key Features
+- **Layout Inference** - Detects headers from bold text and positioning
+- **Page Markers** - Includes `<!-- PAGE: N -->` metadata for traceability
+- **Spatial Preservation** - Respects paragraph breaks and document structure
+- **No Cleaning** - Raw conversion (cleaning happens in Stage 3)
+
+### How It Works
+
+#### Step 1: Sort by Reading Order
+```
+Lines sorted by:
+  1. Y-coordinate (top to bottom)
+  2. X-coordinate (left to right)
+```
+Ensures proper reading order even in multi-column layouts.
+
+#### Step 2: Detect Headers
+Uses heuristics to identify headers:
+- **Bold + Specific Keywords** → Level 2 Header (e.g., "SECTION 1")
+- **Bold + All Caps + Short** → Level 1 Header (e.g., "MEDICAL REPORT")
+- **Bold + Other** → Emphasized text (e.g., "**Important Note**")
+
+```python
+# Before:
+<b>MEDICAL REPORT</b>
+
+# After:
+# MEDICAL REPORT
+```
+
+#### Step 3: Detect Paragraph Breaks
+Calculates vertical gaps between lines:
+- Gap > 2x line height → New paragraph block
+- Smaller gaps → Same paragraph (consecutive)
+
+```python
+# Before (raw):
+text_line_1
+text_line_2
+[large gap]
+text_line_3
+
+# After (markdown):
+text_line_1
+text_line_2
+
+text_line_3
+```
+
+#### Step 4: Add Page Markers
+Each page starts with a metadata comment:
+```markdown
+<!-- PAGE: 1 -->
+
+# MEDICAL REPORT
+...
+
+<!-- PAGE: 2 -->
+
+## Clinical Findings
+...
+```
+
+These markers are parsed by the chunker in Stage 4 to track page numbers.
+
+### Output Structure
+
+**File**: `data/markdown/{filename}_converted.md`
+
+```markdown
+<!-- PAGE: 1 -->
+
+# MEDICAL REPORT
+
+## Patient Demographics
+
+Name: John Doe
+DOB: 01/15/1980
+
+## Clinical Findings
+
+The patient presents with elevated blood pressure...
+
+<!-- PAGE: 2 -->
+
+### Test Results
+
+Lab Values:
+- WBC: 7.5 K/uL
+- Hgb: 14.2 g/dL
+```
+
+### Configuration
+
+```yaml
+conversion:
+  header_confidence: 0.8       # Threshold for header detection
+  min_paragraph_gap: 2.0       # Line height multiplier for paragraph breaks
+  include_page_markers: true   # Add <!-- PAGE: N --> comments
+```
+
+### Troubleshooting Conversion
+
+**Issue**: Headers not detected
+- **Cause**: Text not marked as bold in OCR
+- **Solution**: Check debug PNGs; text styling may be lost in OCR
+
+**Issue**: Wrong paragraph breaks
+- **Cause**: Inconsistent spacing in original PDF
+- **Solution**: Acceptable trade-off; cleaned in Stage 3
+
+---
+
+## Stage 3: Cleaning
+
+Located in `src/processors/cleaner.py`
+
+### Purpose
+Normalize Markdown and remove artifacts introduced by OCR/conversion.
+
+### Cleaning Rules
+
+#### Rule 1: Remove Phantom Images
+**Problem**: Marker sometimes creates image links without proper paths
+```markdown
+# Before:
+![](some_image)
+text content
+
+# After:
+text content
+```
+
+**Implementation**:
+```python
+text = re.sub(r'!\[.*?\]\(.*?\)', '', text)
+```
+
+#### Rule 2: Remove Phantom Citation Links
+**Problem**: Citations `[1]` converted to broken links `[](1)`
+```markdown
+# Before:
+Smith et al. [](citation) showed...
+
+# After:
+Smith et al. showed...
+```
+
+**Implementation**:
+```python
+text = re.sub(r'\[\]\([^)]*\)', '', text)
+```
+
+#### Rule 3: Linearize Markdown Tables
+**Problem**: Markdown tables isolate cells, breaking RAG retrieval
+```markdown
+# Before:
+| Drug      | Dosage | Side Effects  |
+|-----------|--------|---------------|
+| Aspirin   | 500mg  | Headache      |
+| Ibuprofen | 200mg  | Nausea        |
+
+# After:
+Drug: Aspirin, Dosage: 500mg, Side Effects: Headache
+Drug: Ibuprofen, Dosage: 200mg, Side Effects: Nausea
+```
+
+**Why**: RAG systems retrieve individual chunks. Table cells are too isolated; linearization creates larger semantic units.
+
+**Implementation**:
+```python
+def _linearize_tables(self, text: str) -> str:
+    """Convert markdown tables to key-value text format"""
+    lines = text.split('\n')
+    result = []
+    i = 0
+    
+    while i < len(lines):
+        line = lines[i]
+        # Check if this is a table header
+        if '|' in line and i + 1 < len(lines) and '---' in lines[i + 1]:
+            headers = [h.strip() for h in line.split('|')[1:-1]]
+            i += 2  # Skip separator
+            
+            # Process data rows
+            while i < len(lines) and '|' in lines[i]:
+                values = [v.strip() for v in lines[i].split('|')[1:-1]]
+                row_text = ', '.join(f"{h}: {v}" for h, v in zip(headers, values))
+                result.append(row_text)
+                i += 1
+        else:
+            result.append(line)
+            i += 1
+    
+    return '\n'.join(result)
+```
+
+#### Rule 4: Fix Hyphenated Words
+**Problem**: PDF OCR splits words across lines
+```markdown
+# Before:
+The drug showed improve-
+ment in 50% of patients
+
+# After:
+The drug showed improvement in 50% of patients
+```
+
+**Implementation**:
+```python
+text = re.sub(r'(\w+)-\n(\w+)', r'\1\2', text)
+```
+
+#### Rule 5: Collapse Excessive Newlines
+**Problem**: Multiple blank lines create structural noise
+```markdown
+# Before:
+Conclusion.
+
+
+
+
+## References
+
+# After:
+Conclusion.
+
+## References
+```
+
+**Implementation**:
+```python
+text = re.sub(r'\n{3,}', '\n\n', text)
+```
 
 ### Usage
 
@@ -20,84 +263,262 @@ cleaner = TextCleaner()
 cleaned_text = cleaner.clean(raw_markdown)
 ```
 
-### Cleaning Rules
+### Output Structure
 
-#### Rule 1: Remove Phantom Citation Links
+**File**: `data/cleaned/{filename}_cleaned.md`
 
-**Problem**: Marker sometimes converts citations `[1]` into dead links `[](1)`
+Same structure as converted Markdown, but normalized.
 
-**Solution**: Regex removes all `[](...)` patterns
+### Configuration
 
-```python
-# Before: "Smith et al. [](citation) showed..."
-# After:  "Smith et al. showed..."
+```yaml
+cleaning:
+  remove_empty_lines: true
+  normalize_whitespace: true
+  linearize_tables: true
+  fix_hyphenation: true
 ```
 
-#### Rule 2: Linearize Markdown Tables
+### Verification
 
-**Problem**: Markdown tables break RAG retrieval because each cell is isolated
+Check cleaning effectiveness:
+```bash
+# See original vs cleaned side-by-side
+wc -c data/markdown/{file}_converted.md
+wc -c data/cleaned/{file}_cleaned.md
 
-**Solution**: Convert tables to key-value text format
-
-```markdown
-# Before
-| Drug      | Dosage | Side Effects  |
-|-----------|--------|---------------|
-| Aspirin   | 500mg  | Headache      |
-| Ibuprofen | 200mg  | Nausea        |
-
-# After
-Drug: Aspirin, Dosage: 500mg, Side Effects: Headache
-Drug: Ibuprofen, Dosage: 200mg, Side Effects: Nausea
+# Calculate retention ratio
+echo "scale=2; $(wc -c < data/cleaned/{file}_cleaned.md) / $(wc -c < data/markdown/{file}_converted.md) * 100" | bc
 ```
 
-The linearization intelligently handles:
-- Header rows (preserves column names)
-- Data rows (creates key-value pairs)
-- Separator rows (skips them)
+Typical retention: **85-95%** of content
 
-#### Rule 3: Merge Hyphenated Words
+---
 
-**Problem**: PDF OCR splits words across lines: "treat-\nment" 
+## Stage 4: Chunking
 
-**Solution**: Regex merges split words
+Located in `src/processors/chunker.py`
 
-```python
-# Before: "The drug showed improve-\nment"
-# After:  "The drug showed improvement"
+### Purpose
+Split documents into context-aware, semantic chunks suitable for embedding and retrieval.
+
+### Core Innovation: Hierarchical Context Preservation
+
+Traditional chunkers lose structure:
+```
+❌ Chunk 1: "The efficacy results were..."
+❌ Chunk 2: "The side effects included..."
+   → No context about which section these belong to
 ```
 
-#### Rule 4: Collapse Multiple Newlines
-
-**Problem**: Excessive whitespace creates structural noise
-
-**Solution**: Reduce 3+ newlines to 2 (preserve paragraph breaks)
-
-```python
-# Before: "Conclusion.\n\n\n\n## References"
-# After:  "Conclusion.\n\n## References"
+Our chunker preserves hierarchy:
+```
+✅ Chunk 1: "Context: Clinical Studies > Efficacy Results\n\nThe efficacy results were..."
+✅ Chunk 2: "Context: Clinical Studies > Side Effects\n\nThe side effects included..."
+   → Embedded context helps downstream tasks
 ```
 
-### Implementation Details
+### Chunking Strategy
+
+#### Step 1: Parse Hierarchical Structure
+```python
+sections = self._parse_sections(text)
+```
+
+Builds a tree of sections based on Markdown headers:
+```
+├── # MEDICAL REPORT
+│   ├── ## Clinical Findings
+│   │   ├── ### Test Results
+│   │   └── ### Diagnosis
+│   └── ## Treatment Plan
+└── # Appendix
+```
+
+#### Step 2: Extract Page Numbers
+Parses `<!-- PAGE: N -->` comments:
+```python
+current_page_number = 1
+for line in text.split('\n'):
+    if re.match(r'^<!-- PAGE: (\d+) -->$', line):
+        current_page_number = int(match.group(1))
+```
+
+Each section inherits the page number where it starts.
+
+#### Step 3: Apply Chunking Rules
+
+**Rule A: Preserve Atomic Blocks**
+Never split lists, code blocks, or dense structured content:
+```python
+if re.search(r'^\s*[-*+]\s', text, re.MULTILINE):  # Markdown list
+    return [whole_section]
+if re.search(r'^\s*\d+\.\s', text, re.MULTILINE):  # Numbered list
+    return [whole_section]
+if '```' in text:  # Code block
+    return [whole_section]
+```
+
+**Rule B: Size Constraint**
+Keep chunks under max_tokens (default: 512):
+```python
+if estimate_tokens(chunk) <= max_tokens:
+    return [chunk]
+```
+
+Token estimation uses rough formula: `tokens ≈ chars / 4`
+
+**Rule C: Prepend Context Breadcrumb**
+Each chunk includes its path in the document:
+```python
+chunk = f"Context: {context_path}\n\n{chunk_content}"
+```
+
+Examples:
+- `"Context: Clinical Findings > Test Results"`
+- `"Context: Appendix"`
+- `"Context: Treatment Plan > Medications > Dosage"`
+
+#### Step 4: Parameterize Chunks
+Include metadata for retrieval:
+```python
+{
+    'content': str,           # Actual text + context
+    'context': str,           # Breadcrumb path
+    'level': int,             # Header level (1-4)
+    'chunk_index': int,       # Position in document
+    'page_number': int        # Source page (NEW!)
+}
+```
+
+### Output Structure
+
+**File**: `data/chunks/{filename}_chunks.json`
+
+```json
+{
+  "filename": "medical_report",
+  "source_file": "medical_report_cleaned.md",
+  "total_chunks": 42,
+  "chunk_config": {
+    "max_tokens": 512,
+    "chunk_overlap": 300,
+    "include_page_numbers": true
+  },
+  "chunks": [
+    {
+      "content": "Context: Clinical Studies > Efficacy Results\n\nThe drug showed 50% improvement in...",
+      "context": "Clinical Studies > Efficacy Results",
+      "level": 2,
+      "chunk_index": 0,
+      "page_number": 1
+    },
+    {
+      "content": "Context: Clinical Studies > Side Effects\n\nGastrointestinal symptoms...",
+      "context": "Clinical Studies > Side Effects",
+      "level": 2,
+      "chunk_index": 1,
+      "page_number": 2
+    }
+  ]
+}
+```
+
+### Configuration
+
+```yaml
+chunking:
+  max_tokens: 512              # Maximum tokens per chunk
+  chunk_overlap: 300           # Overlap between chunks (not currently used)
+  preserve_headers: true       # Never split header lines
+  include_context: true        # Prepend breadcrumb path
+  include_page_numbers: true   # Track page_number in metadata
+```
+
+### Usage
 
 ```python
-def clean(self, text: str) -> str:
-    # 1. Remove phantom images from Marker
-    text = re.sub(r'!\[.*?\]\(.*?\)', '', text)
-    
-    # 2. Remove phantom citation links like [](1), [](citation)
-    text = re.sub(r'\[\]\([^)]*\)', '', text)
-    
-    # 3. Linearize markdown tables
-    text = self._linearize_tables(text)
-    
-    # 4. Fix broken hyphens
-    text = re.sub(r'(\w+)-\n(\w+)', r'\1\2', text)
-    
-    # 5. Collapse multiple newlines
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    
-    return text.strip()
+from src.processors.chunker import MarkdownChunker
+
+chunker = MarkdownChunker(max_tokens=512)
+chunks = chunker.chunk(cleaned_markdown)
+
+# Each chunk:
+# {
+#     'content': '...',
+#     'context': '...',
+#     'level': 2,
+#     'page_number': 3,
+#     'chunk_index': 5
+# }
+```
+
+### Analysis & Debugging
+
+**Visualize chunk distribution**:
+```bash
+python -c "
+import json
+data = json.load(open('data/chunks/file_chunks.json'))
+chunks = data['chunks']
+
+# Count by level
+from collections import Counter
+levels = Counter(c['level'] for c in chunks)
+print('Chunks by header level:', dict(levels))
+
+# Average chunk size
+sizes = [len(c['content']) for c in chunks]
+print(f'Avg chunk size: {sum(sizes)/len(sizes):.0f} chars')
+
+# Page distribution
+pages = Counter(c['page_number'] for c in chunks)
+print('Chunks per page:', dict(sorted(pages.items())))
+"
+```
+
+### Troubleshooting Chunking
+
+**Issue**: Chunks too small
+- **Cause**: max_tokens too restrictive
+- **Solution**: Increase max_tokens in config (e.g., 1024)
+
+**Issue**: Chunks losing context
+- **Cause**: Header structure unclear
+- **Solution**: Check cleaned Markdown headers with `grep "^#"`
+
+**Issue**: Page numbers all 1
+- **Cause**: No page markers in markdown
+- **Solution**: Verify conversion stage generated `<!-- PAGE: N -->` comments
+
+---
+
+## Full Pipeline Flow Diagram
+
+```
+OCR JSON (Surya output)
+    ↓ [SuryaToMarkdown]
+Converted Markdown + Page Markers
+    ↓ [TextCleaner]
+Cleaned Markdown
+    ↓ [MarkdownChunker]
+Chunks with:
+  - Hierarchical context
+  - Page numbers
+  - Header levels
+    ↓ [SentenceTransformer]
+Embeddings (384 dims)
+    ↓ [Qdrant Upsert]
+Vector Database
+```
+
+---
+
+## Next Steps
+
+Chunked output flows to **Stage 5: Vectorization** where embeddings are generated and indexed.
+
+See [storage.md](storage.md) for vectorization and Qdrant setup.
 ```
 
 ### Testing

@@ -10,7 +10,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.storage.qdrant_client import QdrantManager
+from src.storage.qdrant_manager import QdrantManager
 
 if __name__ == "__main__":
     print("="*60)

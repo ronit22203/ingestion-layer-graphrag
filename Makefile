@@ -1,9 +1,9 @@
-.PHONY: help install clean test test-cleaner test-chunker test-embedder test-qdrant run logs docker-up docker-down
+.PHONY: help install clean test test-processors test-embedder test-qdrant run logs docker-up docker-down docker-logs inspect neo4j-build neo4j-delete neo4j-stats
 
 # Default target
 help:
 	@echo "Medical Data Ingestion Pipeline - Makefile Commands"
-	@echo "===================================================="
+	@echo "======================================================"
 	@echo ""
 	@echo "Setup & Installation:"
 	@echo "  make install          Install dependencies from requirements.txt"
@@ -14,21 +14,39 @@ help:
 	@echo "  make test-embedder    Test embedder (clean -> chunk -> embed -> qdrant)"
 	@echo "  make test-qdrant      Test Qdrant connection & collection management"
 	@echo ""
-	@echo "Pipeline Execution:"
-	@echo "  make run              Run full ingestion pipeline"
-	@echo "  make extract          Extract PDFs to markdown (Step 1)"
-	@echo "  make vectorize        Vectorize markdown files (Step 3)"
+	@echo "Pipeline Execution (5 Stages):"
+	@echo "  make run              Run full 5-stage pipeline"
+	@echo "    Stage 1: PDF → OCR JSON (Surya)"
+	@echo "    Stage 2: OCR JSON → Markdown (Converter)"
+	@echo "    Stage 3: Markdown → Cleaned (Cleaner)"
+	@echo "    Stage 4: Cleaned → Chunks (Chunker)"
+	@echo "    Stage 5: Chunks → Vectors (Vectorizer → Qdrant)"
+	@echo ""
+	@echo "Pipeline Options:"
+	@echo "  make run SKIP=ocr     Skip OCR stage"
+	@echo "  make run SKIP=convert Skip conversion stage"
+	@echo "  make run SKIP=clean   Skip cleaning stage"
+	@echo "  make run SKIP=chunk   Skip chunking stage"
+	@echo "  make run SKIP=vectorize Skip vectorization stage"
+	@echo ""
+	@echo "Pipeline Inspection:"
+	@echo "  make inspect          Inspect pipeline outputs (all stages)"
 	@echo ""
 	@echo "Qdrant Management:"
-	@echo "  make docker-up        Start Qdrant in Docker (docker-compose up -d)"
-	@echo "  make docker-down      Stop Qdrant (docker-compose down)"
+	@echo "  make docker-up        Start Qdrant in Docker"
+	@echo "  make docker-down      Stop Qdrant"
 	@echo "  make docker-logs      View Qdrant logs"
-	@echo "  make qdrant-clear     Clear all embeddings in collection"
-	@echo "  make qdrant-delete    Delete entire collection"
+	@echo "  make qdrant-clear     Clear embeddings"
+	@echo "  make qdrant-delete    Delete collection"
+	@echo ""
+	@echo "Neo4j Knowledge Graph:"
+	@echo "  make neo4j-build      Build knowledge graph from chunks"
+	@echo "  make neo4j-delete     Delete all graph data"
+	@echo "  make neo4j-stats      Show graph statistics"
 	@echo ""
 	@echo "Cleanup:"
-	@echo "  make clean            Remove processed files & __pycache__"
-	@echo "  make clean-all        Clean + reset data folders"
+	@echo "  make clean            Remove cache & logs"
+	@echo "  make clean-all        Reset all data folders & pipeline outputs"
 	@echo ""
 
 # Installation
@@ -53,20 +71,22 @@ test-qdrant:
 	@echo "Running Qdrant Client Test..."
 	python tests/test_qdrant.py
 
-# Pipeline Execution
+# Pipeline Execution (5 Stages with traceability)
 run:
-	@echo "Running full ingestion pipeline..."
-	@echo "  Step 1: Extract PDFs to Markdown"
+	@echo "Running Medical Data Ingestion Pipeline..."
+	@echo "  Input:  data/raw/"
+	@echo "  Output: data/ocr/, data/markdown/, data/cleaned/, data/chunks/"
+	@echo ""
+ifdef SKIP
+	python scripts/run_pipeline.py --skip-$(SKIP)
+else
 	python scripts/run_pipeline.py
-	@echo "✓ Pipeline complete"
+endif
+	@echo "✓ Pipeline complete - Check logs/ingestion.log"
 
-extract:
-	@echo "Running PDF extraction (pdf_marker)..."
-	python -c "from src.extractors.pdf_marker import PDFMarkerExtractor; from pathlib import Path; e = PDFMarkerExtractor('data/interim'); [e.extract(f) for f in Path('data/raw').glob('*.pdf')]"
-
-vectorize:
-	@echo "Vectorizing markdown files..."
-	python src/storage/embedder.py
+inspect:
+	@echo "Inspecting pipeline outputs..."
+	python scripts/inspect_pipeline.py
 
 # Docker / Qdrant Management
 docker-up:
@@ -87,11 +107,24 @@ docker-logs:
 
 qdrant-clear:
 	@echo "Clearing Qdrant collection..."
-	python src/storage/qdrant_client.py clear
+	python src/storage/qdrant_manager.py clear
 
 qdrant-delete:
 	@echo "Deleting Qdrant collection..."
-	python src/storage/qdrant_client.py delete
+	python src/storage/qdrant_manager.py delete
+
+# Neo4j Management
+neo4j-build:
+	@echo "Building knowledge graph from chunks..."
+	python scripts/build_knowledge_graph.py
+
+neo4j-delete:
+	@echo "Deleting knowledge graph data..."
+	python scripts/delete_knowledge_graph.py
+
+neo4j-stats:
+	@echo "Getting knowledge graph statistics..."
+	python -c "from scripts.delete_knowledge_graph import KnowledgeGraphDeleter; deleter = KnowledgeGraphDeleter(); import atexit; atexit.register(deleter.close); deleter.get_graph_stats()"
 
 # Cleanup
 clean:
@@ -102,8 +135,8 @@ clean:
 	@echo "✓ Cleanup complete"
 
 clean-all: clean
-	@echo "Resetting data folders..."
-	rm -rf data/interim/* data/processed/* 
-	@echo "✓ Full reset complete"
+	@echo "Resetting all pipeline data..."
+	rm -rf data/raw/* data/ocr/* data/markdown/* data/cleaned/* data/chunks/* 2>/dev/null || true
+	@echo "✓ All data reset complete"
 
 .SILENT: help

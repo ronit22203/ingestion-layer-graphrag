@@ -1,5 +1,5 @@
 #!/bin/bash
-# ingestion/pipeline.sh
+# scripts/pipeline.sh
 # Medical Data Ingestion Pipeline
 # Orchestrates: PDF->Markdown, Cleaning, Vectorization
 
@@ -7,8 +7,9 @@ set -euo pipefail
 
 # Get the project root
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CONFIG_FILE="$PROJECT_ROOT/ingestion/config.yaml"
-LOG_FILE="$PROJECT_ROOT/ingestion.log"
+CONFIG_FILE="$PROJECT_ROOT/config/settings.yaml"
+LOG_FILE="$PROJECT_ROOT/logs/ingestion.log"
+VENV_DIR="$PROJECT_ROOT/.ingestionenv"
 
 # Validate config exists
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -23,15 +24,12 @@ import yaml
 import os
 with open("$CONFIG_FILE") as f:
     config = yaml.safe_load(f)
-    project_root = config.get('project_root', '.')
-    input_dir = os.path.join("$PROJECT_ROOT", config.get('input_dir', 'medical_docs'))
-    raw_dir = os.path.join("$PROJECT_ROOT", config.get('pdf_to_markdown', {}).get('output_subdir', 'output_docs/raw'))
-    clean_dir = os.path.join("$PROJECT_ROOT", config.get('preprocessing', {}).get('output_dir', 'output_docs/cleaned'))
-    venv_dir = os.path.join("$PROJECT_ROOT", config.get('venv', {}).get('directory', '.venv'))
+    input_dir = os.path.join("$PROJECT_ROOT", config.get('input_dir', 'data/raw'))
+    raw_dir = os.path.join("$PROJECT_ROOT", config.get('pdf_to_markdown', {}).get('output_subdir', 'data/interim'))
+    clean_dir = os.path.join("$PROJECT_ROOT", config.get('preprocessing', {}).get('output_dir', 'data/processed'))
     print(f"INPUT_DIR={input_dir}")
     print(f"RAW_DIR={raw_dir}")
     print(f"CLEAN_DIR={clean_dir}")
-    print(f"VENV_DIR={venv_dir}")
 EOF
 }
 
@@ -48,6 +46,7 @@ if [ -d "$VENV_DIR" ]; then
     echo "✓ Activated virtual environment: $VENV_DIR" | tee -a "$LOG_FILE"
 else
     echo "Warning: Virtual environment not found at $VENV_DIR" | tee -a "$LOG_FILE"
+    echo "Install with: python3 -m venv $VENV_DIR && source $VENV_DIR/bin/activate && pip install -r $PROJECT_ROOT/requirements.txt" | tee -a "$LOG_FILE"
 fi
 
 echo "========================================" | tee -a "$LOG_FILE"
@@ -87,43 +86,35 @@ while IFS= read -r pdf_file; do
     echo "Processing: $filename" | tee -a "$LOG_FILE"
     echo "================================================" | tee -a "$LOG_FILE"
 
-    # Step A: PDF to Markdown (OCR)
-    echo "Step 1/3: OCR (PDF -> Markdown)" | tee -a "$LOG_FILE"
+    # Step A: PDF to Markdown (Marker OCR)
+    echo "Step 1/3: PDF Extraction (PDF -> Markdown)" | tee -a "$LOG_FILE"
     pdf_raw_dir="$RAW_DIR/$filename"
     mkdir -p "$pdf_raw_dir"
     
-    if bash "$PROJECT_ROOT/ingestion/pdf_to_markdown.sh" "$pdf_file" "$pdf_raw_dir" 2>&1 | tee -a "$LOG_FILE"; then
-        echo "✓ OCR complete" | tee -a "$LOG_FILE"
+    if python3 "$PROJECT_ROOT/scripts/run_pipeline.py" --pdf "$pdf_file" --output "$pdf_raw_dir" 2>&1 | tee -a "$LOG_FILE"; then
+        echo "✓ PDF extraction complete" | tee -a "$LOG_FILE"
     else
-        echo "✗ OCR failed for $filename" | tee -a "$LOG_FILE"
+        echo "✗ PDF extraction failed for $filename" | tee -a "$LOG_FILE"
         echo "" | tee -a "$LOG_FILE"
+        ((FAILED++))
         continue
     fi
 
-    # Step B: Preprocessing (Clean Markdown)
-    echo "Step 2/3: Preprocessing (Clean Markdown)" | tee -a "$LOG_FILE"
-    
-    if python "$PROJECT_ROOT/ingestion/preprocesser.py" "$RAW_DIR" -o "$CLEAN_DIR" -d -c "$CONFIG_FILE" 2>&1 | tee -a "$LOG_FILE"; then
-        echo "✓ Preprocessing complete" | tee -a "$LOG_FILE"
-    else
-        echo "✗ Preprocessing failed for $filename" | tee -a "$LOG_FILE"
-        echo "" | tee -a "$LOG_FILE"
-        continue
-    fi
-    
+    ((PROCESSED++))
     echo "" | tee -a "$LOG_FILE"
 
 done < <(find "$INPUT_DIR" -name "*.pdf")
 
 # Step C: Vectorization (Embed & Index) - Run once for all cleaned documents
 echo "================================================" | tee -a "$LOG_FILE"
-echo "Step 3/3: Vectorization (Embed & Index)" | tee -a "$LOG_FILE"
+echo "Step 2/2: Vectorization (Embed & Index)" | tee -a "$LOG_FILE"
 echo "================================================" | tee -a "$LOG_FILE"
 
-if python "$PROJECT_ROOT/ingestion/vectorizer.py" -c "$CONFIG_FILE" -i "$CLEAN_DIR" 2>&1 | tee -a "$LOG_FILE"; then
+if python3 "$PROJECT_ROOT/scripts/run_pipeline.py" --vectorize --config "$CONFIG_FILE" --input "$CLEAN_DIR" 2>&1 | tee -a "$LOG_FILE"; then
     echo "✓ Vectorization complete" | tee -a "$LOG_FILE"
 else
     echo "✗ Vectorization failed" | tee -a "$LOG_FILE"
+    ((FAILED++))
 fi
     
 echo "" | tee -a "$LOG_FILE"
@@ -131,6 +122,8 @@ echo "" | tee -a "$LOG_FILE"
 echo "========================================" | tee -a "$LOG_FILE"
 echo "✓ Pipeline Complete" | tee -a "$LOG_FILE"
 echo "========================================" | tee -a "$LOG_FILE"
+echo "Processed: $PROCESSED files" | tee -a "$LOG_FILE"
+echo "Failed: $FAILED files" | tee -a "$LOG_FILE"
 echo "Output Directory: $CLEAN_DIR" | tee -a "$LOG_FILE"
 echo "Log File: $LOG_FILE" | tee -a "$LOG_FILE"
 date | tee -a "$LOG_FILE"

@@ -6,13 +6,6 @@ project_root: "."
 input_dir: "data/raw"
 log_file: "logs/ingestion.log"
 
-# Output Directories
-output:
-  ocr_dir: "data/ocr"           # OCR JSON + debug PNGs
-  markdown_dir: "data/markdown" # Raw markdown
-  cleaned_dir: "data/cleaned"   # Cleaned markdown
-  chunks_dir: "data/chunks"     # Chunked JSON
-
 # Pipeline Stage 1: OCR (PDF -> OCR JSON)
 ocr:
   # Surya OCR configuration
@@ -21,7 +14,6 @@ ocr:
   det_batch_size: 2                # Detection batch size
   rec_batch_size: 16               # Recognition batch size
   image_scale: 2                   # 2=144 DPI (good), 3=216 DPI (better for small text)
-  output_dir: "data/ocr"           # Where OCR JSON output is saved
 
 # Pipeline Stage 2: Convert (OCR JSON -> Markdown)
 conversion:
