@@ -18,6 +18,7 @@ import yaml
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.determinism import DeterminismTracker
 from src.extractors.pdf_marker_v2 import initialize_models, load_pdf_images, serialize_surya_results
 from src.extractors.surya_converter import SuryaToMarkdown
 from src.processors.cleaner import TextCleaner
@@ -113,6 +114,9 @@ class MedicalDataPipeline:
         for directory in [self.input_dir, self.ocr_dir, self.markdown_dir,
                           self.cleaned_dir, self.chunks_dir]:
             directory.mkdir(parents=True, exist_ok=True)
+        
+        # Determinism tracking
+        self.tracker = DeterminismTracker()
     
     def _resolve_path(self, relative_path: str) -> Path:
         """Resolve paths relative to project root"""
@@ -181,12 +185,29 @@ class MedicalDataPipeline:
             
             filename = pdf_file.stem
             
+            # Register document and start a tracked execution
+            doc_uuid = self.tracker.register_document(pdf_file.name)
+            hyperparameters = {
+                "ocr": self.config.get('ocr', {}),
+                "chunking": self.config.get('chunking', {}),
+                "vectorization": {
+                    k: v for k, v in self.config.get('vectorization', {}).items()
+                    if k != 'qdrant_url'  # exclude infra details from hyperparams
+                },
+            }
+            exec_uuid = self.tracker.start_execution(doc_uuid, hyperparameters=hyperparameters)
+            self.logger.info(f"  Tracking: doc={doc_uuid[:8]}... exec={exec_uuid[:8]}...")
+            
+            exec_status = "failed"
             try:
-        # Stage 1: PDF to OCR JSON (Surya)
+                # Stage 1: PDF to OCR JSON (Surya)
                 if not skip_ocr:
                     self.logger.info(f"  Stage 1/5: PDF → OCR JSON (Surya)")
                     ocr_json_path = self._stage1_ocr(pdf_file, filename)
                     self.logger.info(f"  ✓ OCR complete: {ocr_json_path.name}")
+                    self.tracker.record_stage(exec_uuid, "extract",
+                                              ocr_json_path.read_text(encoding="utf-8"),
+                                              artifact_ext="json")
                 else:
                     self.logger.info(f"  Stage 1/5: Skipped (--skip-ocr)")
                     ocr_json_path = self.ocr_dir / f"{filename}_ocr.json"
@@ -196,6 +217,9 @@ class MedicalDataPipeline:
                     self.logger.info(f"  Stage 2/5: OCR JSON → Markdown")
                     converted_md_path = self._stage2_convert(ocr_json_path, filename)
                     self.logger.info(f"  ✓ Conversion complete: {converted_md_path.name}")
+                    self.tracker.record_stage(exec_uuid, "convert",
+                                              converted_md_path.read_text(encoding="utf-8"),
+                                              artifact_ext="md")
                 else:
                     self.logger.info(f"  Stage 2/5: Skipped (--skip-convert)")
                     converted_md_path = self.markdown_dir / f"{filename}_converted.md"
@@ -205,6 +229,9 @@ class MedicalDataPipeline:
                     self.logger.info(f"  Stage 3/5: Markdown → Cleaned")
                     cleaned_md_path = self._stage3_clean(converted_md_path, filename)
                     self.logger.info(f"  ✓ Cleaning complete: {cleaned_md_path.name}")
+                    self.tracker.record_stage(exec_uuid, "clean",
+                                              cleaned_md_path.read_text(encoding="utf-8"),
+                                              artifact_ext="md")
                 else:
                     self.logger.info(f"  Stage 3/5: Skipped (--skip-clean)")
                     cleaned_md_path = self.cleaned_dir / f"{filename}_cleaned.md"
@@ -214,9 +241,13 @@ class MedicalDataPipeline:
                     self.logger.info(f"  Stage 4/5: Markdown → Chunks")
                     chunks_json_path = self._stage4_chunk(cleaned_md_path, filename)
                     self.logger.info(f"  ✓ Chunking complete: {chunks_json_path.name}")
+                    self.tracker.record_stage(exec_uuid, "chunk",
+                                              chunks_json_path.read_text(encoding="utf-8"),
+                                              artifact_ext="json")
                 else:
                     self.logger.info(f"  Stage 4/5: Skipped (--skip-chunk)")
                 
+                exec_status = "completed"
                 successful += 1
                 
             except Exception as e:
@@ -225,6 +256,8 @@ class MedicalDataPipeline:
                 self.logger.error(f"  Traceback: {traceback.format_exc()}")
                 failed += 1
                 failed_files.append(filename)
+            finally:
+                self.tracker.complete_execution(exec_uuid, status=exec_status)
         
         # Stage 5: Vectorization (once for all files)
         if not skip_vectorize and (successful > 0 or not skip_clean):

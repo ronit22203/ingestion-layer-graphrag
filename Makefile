@@ -1,4 +1,4 @@
-.PHONY: help install clean test test-processors test-embedder test-qdrant run logs docker-up docker-down docker-logs inspect neo4j-build neo4j-delete neo4j-stats
+.PHONY: help install clean test test-processors test-embedder test-qdrant run logs docker-up docker-down docker-logs inspect neo4j-build neo4j-delete neo4j-stats list-documents list-executions compare-runs
 
 # Default target
 help:
@@ -43,6 +43,11 @@ help:
 	@echo "  make neo4j-build      Build knowledge graph from chunks"
 	@echo "  make neo4j-delete     Delete all graph data"
 	@echo "  make neo4j-stats      Show graph statistics"
+	@echo ""
+	@echo "Determinism & Reproducibility:"
+	@echo "  make list-documents                             List all tracked documents"
+	@echo "  make list-executions DOC=<uuid>                 List executions for a document"
+	@echo "  make compare-runs DOC=<uuid> EXEC1=<u> EXEC2=<u>  Compare two executions"
 	@echo ""
 	@echo "Cleanup:"
 	@echo "  make clean            Remove cache & logs"
@@ -125,6 +130,16 @@ neo4j-delete:
 neo4j-stats:
 	@echo "Getting knowledge graph statistics..."
 	python -c "from scripts.delete_knowledge_graph import KnowledgeGraphDeleter; deleter = KnowledgeGraphDeleter(); import atexit; atexit.register(deleter.close); deleter.get_graph_stats()"
+
+# Determinism & Reproducibility
+list-documents:
+	@python scripts/compare_executions.py list-documents
+
+list-executions:
+	@python scripts/compare_executions.py list-executions --doc $(DOC)
+
+compare-runs:
+	@python scripts/compare_executions.py --doc $(DOC) --exec1 $(EXEC1) --exec2 $(EXEC2)
 
 # Cleanup
 clean:
