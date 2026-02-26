@@ -2,13 +2,22 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 class SuryaToMarkdown:
     """
     Converts raw Surya OCR JSON into structured Markdown.
     Leverages <b> tags and layout geometry to infer headers.
+
+    Args:
+        config: Optional full pipeline config dict (config/settings.yaml loaded).
+                When supplied, heuristic thresholds are read from config['conversion'].
     """
+
+    def __init__(self, config: Dict[str, Any] = None):
+        conv_cfg = (config or {}).get('conversion', {})
+        self._gap_multiplier: float = conv_cfg.get('paragraph_gap_multiplier', 2.0)
+        self._bold_header_max_chars: int = conv_cfg.get('bold_header_max_chars', 50)
 
     def convert(self, ocr_data: List[Dict[str, Any]]) -> str:
         markdown_output = []
@@ -51,7 +60,7 @@ class SuryaToMarkdown:
                 if clean_text.upper().startswith("SECTION"):
                     # Level 2 Header
                     clean_text = f"## {clean_text}"
-                elif len(clean_text) < 50 and clean_text.isupper():
+                elif len(clean_text) < self._bold_header_max_chars and clean_text.isupper():
                     # Likely a Title (MEDICAL REPORT)
                     clean_text = f"# {clean_text}"
                 else:
@@ -68,8 +77,8 @@ class SuryaToMarkdown:
                 # Estimate line height (bbox height)
                 line_height = bbox[3] - bbox[1]
                 
-                # If gap is huge (> 2x line height), it's a new block
-                if gap > (line_height * 2.0):
+                # If gap exceeds multiplier * line_height, treat as new paragraph block
+                if gap > (line_height * self._gap_multiplier):
                      md_lines.append("\n") # Add extra newline for spacing
                 # If gap is small, it's the same paragraph (handled by join later)
 

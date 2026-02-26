@@ -1,15 +1,20 @@
 import re
-from typing import List, Dict
+from typing import List, Dict, Any
 
 class MarkdownChunker:
     """Context-aware hierarchical chunker for medical markdown documents."""
     
-    def __init__(self, max_tokens: int = 512):
+    def __init__(self, max_tokens: int = 512, chunk_overlap: int = 0, min_chunk_tokens: int = 0):
         """
         Args:
-            max_tokens: Maximum tokens per chunk (rough estimate: 1 token ≈ 4 chars)
+            max_tokens: Maximum tokens per chunk (rough estimate: 1 token ≈ 4 chars).
+            chunk_overlap: Token overlap between consecutive chunks (sliding window).
+                           Applied only when a section is split by _split_large_section.
+            min_chunk_tokens: Discard chunks smaller than this (noise filter). 0 = disabled.
         """
         self.max_tokens = max_tokens
+        self.chunk_overlap = chunk_overlap
+        self.min_chunk_tokens = min_chunk_tokens
     
     def chunk(self, text: str) -> List[Dict[str, str]]:
         """
@@ -33,7 +38,7 @@ class MarkdownChunker:
         for section in sections:
             chunk_text = self._build_chunk_with_context(section)
             
-            # Rule B: If section <512 tokens, keep it whole
+            # Rule B: If section <max_tokens, keep it whole
             if self._estimate_tokens(chunk_text) <= self.max_tokens:
                 chunks.append({
                     'content': chunk_text,
@@ -44,6 +49,10 @@ class MarkdownChunker:
             else:
                 # Split large sections while preserving context
                 chunks.extend(self._split_large_section(section))
+        
+        # Apply min_chunk_tokens filter
+        if self.min_chunk_tokens > 0:
+            chunks = [c for c in chunks if self._estimate_tokens(c['content']) >= self.min_chunk_tokens]
         
         return chunks
     
@@ -130,12 +139,16 @@ class MarkdownChunker:
         return len(text) // 4
     
     def _split_large_section(self, section: Dict) -> List[Dict]:
-        """Split large sections while preserving context and respecting atomic blocks."""
+        """Split large sections while preserving context and respecting atomic blocks.
+        
+        When chunk_overlap > 0, consecutive chunks share trailing/leading paragraphs
+        so that concepts spanning a boundary are present in both chunks.
+        """
         chunks = []
         content = section['content']
         page_number = section.get('page_number', 1)
         
-        # Rule A: Never split lists or code blocks
+        # Rule A: Never split lists or code blocks (unless oversized)
         if self._is_atomic_block(content):
             return [{
                 'content': self._build_chunk_with_context(section),
@@ -146,34 +159,43 @@ class MarkdownChunker:
         
         # Split by paragraphs (natural boundaries)
         paragraphs = content.split('\n\n')
-        current_chunk = []
+        current_paras: List[str] = []
         
-        for para in paragraphs:
-            test_content = '\n\n'.join(current_chunk + [para])
-            test_chunk = f"Context: {section['context_path']}\n\n{test_content}"
-            
-            if self._estimate_tokens(test_chunk) > self.max_tokens and current_chunk:
-                # Save current chunk with context
-                chunk_content = '\n\n'.join(current_chunk)
-                chunks.append({
-                    'content': f"Context: {section['context_path']}\n\n{chunk_content}",
-                    'context': section['context_path'],
-                    'level': section['level'],
-                    'page_number': page_number
-                })
-                current_chunk = [para]
-            else:
-                current_chunk.append(para)
-        
-        # Add remaining content
-        if current_chunk:
-            chunk_content = '\n\n'.join(current_chunk)
-            chunks.append({
+        def _make_chunk(paras: List[str]) -> Dict:
+            chunk_content = '\n\n'.join(paras)
+            return {
                 'content': f"Context: {section['context_path']}\n\n{chunk_content}",
                 'context': section['context_path'],
                 'level': section['level'],
-                'page_number': page_number
-            })
+                'page_number': page_number,
+            }
+        
+        for para in paragraphs:
+            test_content = '\n\n'.join(current_paras + [para])
+            test_chunk = f"Context: {section['context_path']}\n\n{test_content}"
+            
+            if self._estimate_tokens(test_chunk) > self.max_tokens and current_paras:
+                chunks.append(_make_chunk(current_paras))
+                
+                # Sliding-window overlap: carry over trailing paragraphs
+                if self.chunk_overlap > 0:
+                    overlap_paras: List[str] = []
+                    overlap_tokens = 0
+                    for p in reversed(current_paras):
+                        p_tokens = self._estimate_tokens(p)
+                        if overlap_tokens + p_tokens > self.chunk_overlap:
+                            break
+                        overlap_paras.insert(0, p)
+                        overlap_tokens += p_tokens
+                    current_paras = overlap_paras + [para]
+                else:
+                    current_paras = [para]
+            else:
+                current_paras.append(para)
+        
+        # Add remaining content
+        if current_paras:
+            chunks.append(_make_chunk(current_paras))
         
         return chunks
     

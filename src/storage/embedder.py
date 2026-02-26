@@ -46,6 +46,7 @@ class MedicalVectorizer:
         
         # Get vectorization config
         vec_config = config.get('vectorization', {})
+        chunk_config = config.get('chunking', {})
         
         # Set collection name (from param > config > default)
         self.collection_name = collection_name or vec_config.get('collection_name', 'medical_papers')
@@ -57,20 +58,38 @@ class MedicalVectorizer:
         
         # 2. Load Embedding Model
         model_name = vec_config.get('model_name', 'BAAI/bge-small-en-v1.5')
-        print(f"Loading embedding model: {model_name}")
-        self.embedding_model = SentenceTransformer(model_name)
+        device = vec_config.get('device', 'cpu')
+        print(f"Loading embedding model: {model_name} (device={device})")
+        self.embedding_model = SentenceTransformer(model_name, device=device)
         self.embedding_dim = self.embedding_model.get_sentence_embedding_dimension()
+        self._normalize_embeddings: bool = vec_config.get('normalize_embeddings', False)
         
         # 3. Initialize cleaner and chunker
-        self.cleaner = TextCleaner()
-        self.chunker = MarkdownChunker(max_tokens=vec_config.get('chunk_size', 512))
+        self.cleaner = TextCleaner(config=config)
+        max_tokens = chunk_config.get('max_tokens', 512)
+        chunk_overlap = chunk_config.get('chunk_overlap', 0)
+        min_chunk_tokens = chunk_config.get('min_chunk_tokens', 0)
+        self.chunker = MarkdownChunker(
+            max_tokens=max_tokens,
+            chunk_overlap=chunk_overlap,
+            min_chunk_tokens=min_chunk_tokens,
+        )
 
-        # 4. Create Collection (Idempotent)
+        # 4. Determine Qdrant distance metric
+        _metric_map = {
+            'cosine': Distance.COSINE,
+            'dot': Distance.DOT,
+            'euclidean': Distance.EUCLID,
+        }
+        distance_metric = vec_config.get('distance_metric', 'cosine').lower()
+        qdrant_distance = _metric_map.get(distance_metric, Distance.COSINE)
+
+        # 5. Create Collection (Idempotent)
         if not self.client.collection_exists(self.collection_name):
-            print(f"Creating collection '{self.collection_name}' with {self.embedding_dim} dimensions...")
+            print(f"Creating collection '{self.collection_name}' with {self.embedding_dim} dimensions ({distance_metric})...")
             self.client.create_collection(
                 collection_name=self.collection_name,
-                vectors_config=VectorParams(size=self.embedding_dim, distance=Distance.COSINE)
+                vectors_config=VectorParams(size=self.embedding_dim, distance=qdrant_distance)
             )
         else:
             print(f"Collection '{self.collection_name}' already exists")
@@ -107,7 +126,10 @@ class MedicalVectorizer:
         
         for i, chunk in enumerate(chunks):
             # Embed the chunk content
-            embedding = self.embedding_model.encode(chunk['content']).tolist()
+            embedding = self.embedding_model.encode(
+                chunk['content'],
+                normalize_embeddings=self._normalize_embeddings,
+            ).tolist()
             
             # Prepare metadata
             metadata = {

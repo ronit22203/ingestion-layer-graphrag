@@ -1,42 +1,77 @@
 import re
 import logging
-from typing import Optional, Dict
+from typing import Optional, Dict, Any, List
 
 # Set up logging
 logger = logging.getLogger(__name__)
+
+# Default PII settings used when no config is supplied
+_DEFAULT_PII_ENTITIES = [
+    "PERSON", "PHONE_NUMBER", "EMAIL_ADDRESS",
+    "SG_NRIC", "MCR_NO", "DATE_TIME", "URL",
+]
+_DEFAULT_PII_REPLACEMENTS = {
+    "DEFAULT": "<REDACTED>",
+    "PERSON": "<PERSON>",
+    "EMAIL_ADDRESS": "<EMAIL>",
+    "PHONE_NUMBER": "<PHONE>",
+    "SG_NRIC": "<NRIC_ID>",
+    "MCR_NO": "<MEDICAL_LICENSE_ID>",
+    "DATE_TIME": "<DATE>",
+    "URL": "<URL>",
+}
+_DEFAULT_CUSTOM_RECOGNIZERS = [
+    {"entity": "SG_NRIC", "regex": r"(?i)[STFG]\d{7}[A-Z]", "score": 1.0},
+    {"entity": "MCR_NO",  "regex": r"\b\d{6}\b",              "score": 0.6},
+]
+
 
 class TextCleaner:
     """
     Markdown text cleaning with PII removal.
     Removes artifacts, normalizes formatting, and anonymizes sensitive information.
+
+    Args:
+        config: Optional full pipeline config dict (config/settings.yaml loaded).
+                When supplied, all PII settings are read from config['cleaning'].
+                When None, built-in defaults are used.
     """
-    
-    def __init__(self, remove_pii: bool = True):
-        self.remove_pii = remove_pii
+
+    def __init__(self, config: Dict[str, Any] = None):
+        cleaning_cfg = (config or {}).get('cleaning', {})
+
+        self.remove_pii: bool = cleaning_cfg.get('remove_pii', True)
+        self._fail_safe: bool = cleaning_cfg.get('fail_safe_on_pii_error', True)
+        self._language: str  = cleaning_cfg.get('language', 'en')
+        self._pii_entities: List[str] = cleaning_cfg.get('pii_entities', _DEFAULT_PII_ENTITIES)
+        self._pii_replacements: Dict[str, str] = cleaning_cfg.get('pii_replacements', _DEFAULT_PII_REPLACEMENTS)
+        self._custom_recognizers: List[Dict] = cleaning_cfg.get('custom_recognizers', _DEFAULT_CUSTOM_RECOGNIZERS)
+
         self.pii_analyzer = None
         self.pii_anonymizer = None
-        
-        if remove_pii:
+
+        if self.remove_pii:
             try:
                 from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
                 from presidio_anonymizer import AnonymizerEngine
-                
-                # Initialize Engines
+
                 self.pii_analyzer = AnalyzerEngine()
                 self.pii_anonymizer = AnonymizerEngine()
-                
-                # --- CRITICAL: Add Custom Recognizers for Singaporean Medical Data ---
-                # 1. Singapore NRIC/FIN (e.g., S1234567X)
-                nric_pattern = Pattern(name="sg_nric_pattern", regex=r"(?i)[STFG]\d{7}[A-Z]", score=1.0)
-                nric_recognizer = PatternRecognizer(supported_entity="SG_NRIC", patterns=[nric_pattern])
-                self.pii_analyzer.registry.add_recognizer(nric_recognizer)
 
-                # 2. MCR Number (Medical Registration)
-                mcr_pattern = Pattern(name="mcr_pattern", regex=r"\b\d{6}\b", score=0.6)
-                mcr_recognizer = PatternRecognizer(supported_entity="MCR_NO", patterns=[mcr_pattern])
-                self.pii_analyzer.registry.add_recognizer(mcr_recognizer)
-                
-                logger.info("PII Redaction initialized with custom Singaporean recognizers.")
+                # Register custom recognizers from config
+                for rec_cfg in self._custom_recognizers:
+                    pattern = Pattern(
+                        name=f"{rec_cfg['entity'].lower()}_pattern",
+                        regex=rec_cfg['regex'],
+                        score=rec_cfg.get('score', 0.8),
+                    )
+                    recognizer = PatternRecognizer(
+                        supported_entity=rec_cfg['entity'],
+                        patterns=[pattern],
+                    )
+                    self.pii_analyzer.registry.add_recognizer(recognizer)
+
+                logger.info("PII Redaction initialized (entities: %s).", self._pii_entities)
 
             except ImportError:
                 logger.warning("⚠️  Presidio not installed. PII removal disabled.")
@@ -75,52 +110,36 @@ class TextCleaner:
         return text.strip()
     
     def _remove_pii(self, text: str) -> str:
-        """
-        Detect and anonymize PII using Presidio.
-        """
+        """Detect and anonymize PII using Presidio."""
         try:
             from presidio_anonymizer.entities import OperatorConfig
 
-            # Analyze text
             results = self.pii_analyzer.analyze(
-                text=text, 
-                language="en",
-                entities=[
-                    "PERSON", "PHONE_NUMBER", "EMAIL_ADDRESS", 
-                    "SG_NRIC", "MCR_NO", "DATE_TIME", "URL"
-                ]
+                text=text,
+                language=self._language,
+                entities=self._pii_entities,
             )
             
             if not results:
                 return text
 
-            # Define Operators using OperatorConfig (The Fix for the crash)
             operators = {
-                "DEFAULT": OperatorConfig("replace", {"new_value": "<REDACTED>"}),
-                "PERSON": OperatorConfig("replace", {"new_value": "<PERSON>"}),
-                "EMAIL_ADDRESS": OperatorConfig("replace", {"new_value": "<EMAIL>"}),
-                "PHONE_NUMBER": OperatorConfig("replace", {"new_value": "<PHONE>"}),
-                "SG_NRIC": OperatorConfig("replace", {"new_value": "<NRIC_ID>"}),
-                "MCR_NO": OperatorConfig("replace", {"new_value": "<MEDICAL_LICENSE_ID>"}),
-                "DATE_TIME": OperatorConfig("replace", {"new_value": "<DATE>"}),
-                "URL": OperatorConfig("replace", {"new_value": "<URL>"}),
+                entity: OperatorConfig("replace", {"new_value": replacement})
+                for entity, replacement in self._pii_replacements.items()
             }
-            
-            # Anonymize
+
             anonymized = self.pii_anonymizer.anonymize(
                 text=text,
                 analyzer_results=results,
-                operators=operators
+                operators=operators,
             )
             
             return anonymized.text
         
         except Exception as e:
             logger.error(f"⚠️  PII removal error: {e}")
-            # Fail safe: Do NOT return raw text if we suspected PII but failed to clean it.
-            # However, blocking the pipeline is also bad.
-            # Log critical warning and return text (assuming downstream manual review)
-            # Or raise error to stop pipeline.
+            if not self._fail_safe:
+                raise
             logger.critical("Returning unredacted text due to error.")
             return text
 

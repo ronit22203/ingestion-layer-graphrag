@@ -22,12 +22,17 @@ ocr:
   rec_batch_size: 16               # Recognition batch size
   image_scale: 2                   # 2=144 DPI (good), 3=216 DPI (better for small text)
   output_dir: "data/ocr"           # Where OCR JSON output is saved
+  confidence_threshold: 0.80       # Box colour: green>=threshold, red<threshold
+  save_debug_images: true          # Toggle debug PNG generation
+  max_pages: null                  # null = process all pages; set integer to cap
 
 # Pipeline Stage 2: Convert (OCR JSON -> Markdown)
 conversion:
   # SuryaToMarkdown settings
   infer_headers: true              # Detect headers from bold text & layout
   preserve_spacing: true           # Preserve paragraph gaps
+  paragraph_gap_multiplier: 2.0    # Gap > N * line_height triggers new paragraph
+  bold_header_max_chars: 50        # Bold text shorter than N chars = header candidate
 
 # Pipeline Stage 3: Clean (Markdown -> Cleaned)
 cleaning:
@@ -36,29 +41,83 @@ cleaning:
   linearize_tables: true           # Convert tables to readable format
   fix_hyphenation: true            # Merge hyphenated words
   collapse_whitespace: true        # Remove excessive newlines
+  # PII redaction settings
+  remove_pii: true                 # Enable/disable PII redaction entirely
+  fail_safe_on_pii_error: true     # true=return text on error, false=raise exception
+  language: "en"                   # Language for Presidio analysis
+  pii_entities:                    # Entities to detect and redact
+    - "PERSON"
+    - "PHONE_NUMBER"
+    - "EMAIL_ADDRESS"
+    - "SG_NRIC"
+    - "MCR_NO"
+    - "DATE_TIME"
+    - "URL"
+  pii_replacements:                # Replacement tokens keyed by entity type
+    DEFAULT: "<REDACTED>"
+    PERSON: "<PERSON>"
+    EMAIL_ADDRESS: "<EMAIL>"
+    PHONE_NUMBER: "<PHONE>"
+    SG_NRIC: "<NRIC_ID>"
+    MCR_NO: "<MEDICAL_LICENSE_ID>"
+    DATE_TIME: "<DATE>"
+    URL: "<URL>"
+  custom_recognizers:              # Additional Presidio pattern recognizers
+    - entity: "SG_NRIC"
+      regex: "(?i)[STFG]\\d{7}[A-Z]"
+      score: 1.0
+    - entity: "MCR_NO"
+      regex: "\\b\\d{6}\\b"
+      score: 0.6
 
 # Pipeline Stage 4: Chunk (Cleaned -> Chunks JSON)
 chunking:
-  max_tokens: 500                 # Tokens per chunk
-  chunk_overlap: 300               # Overlap between chunks
+  max_tokens: 500                  # Maximum tokens per chunk (1 token ≈ 4 chars)
+  chunk_overlap: 50                # Token overlap between consecutive chunks (sliding window)
+  min_chunk_tokens: 20             # Discard chunks smaller than this (noise filter)
   headers_to_split: ["#", "##", "###"]
-  respect_atomic_blocks: true      # Never split lists/code blocks
+  respect_atomic_blocks: true      # Never split lists/code blocks unless oversized
 
 # Pipeline Stage 5: Vectorize (Chunks -> Qdrant)
 vectorization:
   # Embedding model
   model_name: "BAAI/bge-small-en-v1.5"
   embedding_dim: 384
-  
+  device: "cpu"                    # cpu, cuda, mps — passed to SentenceTransformer
+  normalize_embeddings: false      # L2-normalize embeddings before indexing
+  distance_metric: "cosine"        # cosine | dot | euclidean — Qdrant collection metric
+
   # Qdrant settings
   qdrant_url: "http://localhost:6333"
   collection_name: "medical_papers"
-  
+
   # Vectorization batch size
   batch_size: 64
 
+# Neo4j Knowledge Graph
+neo4j:
+  uri: "bolt://localhost:7687"
+  user: "neo4j"
+  password: "testpassword"
+  database: "neo4j"               # Target Neo4j database name
+
+# Retrieval Layer
+retrieval:
+  default_limit: 3                 # Default number of results returned
+  hybrid_search: true              # true = vector + graph enrichment, false = vector only
+
+# Pipeline Orchestration
+pipeline:
+  skip_existing: false             # Skip re-processing already-converted files
+  max_retries: 1                   # Retry count per stage on transient failure
+  parallel_workers: 1              # >1 enables parallel PDF processing (experimental)
+
 # Logging & Debug
 logging:
-  level: "INFO"                    # DEBUG, INFO, WARNING, ERROR
-  save_artifacts: true             # Save intermediate outputs
+  level: "INFO"                    # Root log level (legacy — use console_level/file_level below)
+  save_artifacts: true             # Save intermediate outputs to disk
+  console_level: "INFO"            # Log level for stdout handler
+  file_level: "DEBUG"              # Log level for file handler
+  max_size_mb: 50                  # Rotating file handler max size (MB)
+  backup_count: 3                  # Number of rotated log files to keep
 

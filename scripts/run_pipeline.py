@@ -30,8 +30,16 @@ class PipelineLogger:
     """Setup and manage logging for the pipeline with comprehensive traceability"""
     
     @staticmethod
-    def setup(log_file: str) -> logging.Logger:
-        """Setup dual logging: console (INFO) and file (DEBUG)"""
+    def setup(log_file: str, config: dict = None) -> logging.Logger:
+        """Setup dual logging: console (INFO) and rotating file (DEBUG)"""
+        from logging.handlers import RotatingFileHandler
+
+        log_cfg = (config or {}).get('logging', {})
+        console_level_name = log_cfg.get('console_level', 'INFO')
+        file_level_name    = log_cfg.get('file_level', 'DEBUG')
+        max_bytes          = log_cfg.get('max_size_mb', 50) * 1024 * 1024
+        backup_count       = log_cfg.get('backup_count', 3)
+
         logger = logging.getLogger("pipeline")
         logger.setLevel(logging.DEBUG)
         
@@ -41,13 +49,15 @@ class PipelineLogger:
         # Ensure log directory exists
         Path(log_file).parent.mkdir(parents=True, exist_ok=True)
         
-        # Console handler (INFO level - user friendly)
+        # Console handler
         console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(logging.INFO)
+        console_handler.setLevel(getattr(logging, console_level_name.upper(), logging.INFO))
         
-        # File handler (DEBUG level - comprehensive)
-        file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
-        file_handler.setLevel(logging.DEBUG)
+        # Rotating file handler
+        file_handler = RotatingFileHandler(
+            log_file, maxBytes=max_bytes, backupCount=backup_count, encoding='utf-8'
+        )
+        file_handler.setLevel(getattr(logging, file_level_name.upper(), logging.DEBUG))
         
         # Rich formatter with timestamps and colors for console
         console_formatter = logging.Formatter(
@@ -98,7 +108,7 @@ class MedicalDataPipeline:
         self.project_root = PROJECT_ROOT
         self.log_file = self.project_root / self.config.get('log_file', 'logs/ingestion.log')
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
-        self.logger = PipelineLogger.setup(str(self.log_file))
+        self.logger = PipelineLogger.setup(str(self.log_file), config=self.config)
         
         # Resolve paths from config - organized logically
         self.input_dir = self._resolve_path(self.config.get('input_dir', 'data/raw'))
@@ -336,8 +346,9 @@ class MedicalDataPipeline:
             
             self.logger.info(f"    • Saved OCR JSON: {ocr_json_path.name}")
             
-            # Save debug visualizations
-            self._save_debug_images(images, results, pdf_ocr_dir, filename)
+            # Save debug visualizations (toggled by config)
+            if self.config.get('ocr', {}).get('save_debug_images', True):
+                self._save_debug_images(images, results, pdf_ocr_dir, filename)
             
             return ocr_json_path
             
@@ -347,6 +358,8 @@ class MedicalDataPipeline:
     def _save_debug_images(self, images, results, output_dir, filename):
         """Save debug visualization images with OCR boxes"""
         from PIL import ImageDraw
+        
+        confidence_threshold = self.config.get('ocr', {}).get('confidence_threshold', 0.80)
         
         debug_dir = output_dir / "debug_visualizations"
         debug_dir.mkdir(parents=True, exist_ok=True)
@@ -359,7 +372,7 @@ class MedicalDataPipeline:
             for line in result.text_lines:
                 box = line.bbox
                 confidence = line.confidence
-                color = "green" if confidence >= 0.80 else "red"
+                color = "green" if confidence >= confidence_threshold else "red"
                 draw.rectangle(box, outline=color, width=2)
             
             # Save debug image
@@ -375,7 +388,7 @@ class MedicalDataPipeline:
                 ocr_data = json.load(f)
             
             # Convert to markdown
-            converter = SuryaToMarkdown()
+            converter = SuryaToMarkdown(config=self.config)
             markdown_output = converter.convert(ocr_data)
             
             # Save converted markdown
@@ -400,7 +413,7 @@ class MedicalDataPipeline:
             original_size = len(content)
             
             # Clean
-            cleaner = TextCleaner()
+            cleaner = TextCleaner(config=self.config)
             cleaned = cleaner.clean(content)
             cleaned_size = len(cleaned)
             
@@ -427,9 +440,14 @@ class MedicalDataPipeline:
             # Chunk - use config values
             chunk_config = self.config.get('chunking', {})
             max_tokens = chunk_config.get('max_tokens', 500)
-            chunk_overlap = chunk_config.get('chunk_overlap', 300)
+            chunk_overlap = chunk_config.get('chunk_overlap', 0)
+            min_chunk_tokens = chunk_config.get('min_chunk_tokens', 0)
             
-            chunker = MarkdownChunker(max_tokens=max_tokens)
+            chunker = MarkdownChunker(
+                max_tokens=max_tokens,
+                chunk_overlap=chunk_overlap,
+                min_chunk_tokens=min_chunk_tokens,
+            )
             chunks = chunker.chunk(content)
             
             # Create output with metadata

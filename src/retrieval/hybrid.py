@@ -1,35 +1,71 @@
 import logging
-from typing import List, Dict
+from pathlib import Path
+from typing import List, Dict, Any, Optional
 from qdrant_client import QdrantClient
 from neo4j import GraphDatabase
 from sentence_transformers import SentenceTransformer
-
-# Config
-QDRANT_URL = "http://localhost:6333"
-NEO4J_URI = "bolt://localhost:7687"
-NEO4J_AUTH = ("neo4j", "testpassword")
-COLLECTION = "medical_papers"
+import yaml
 
 logger = logging.getLogger(__name__)
 
+
+def _load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
+    """Load pipeline config from YAML; falls back to config/settings.yaml."""
+    if config_path is None:
+        project_root = Path(__file__).parent.parent.parent
+        config_path = project_root / "config" / "settings.yaml"
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
+
 class HybridRetriever:
-    def __init__(self):
+    def __init__(self, config: Dict[str, Any] = None, config_path: str = None):
+        """
+        Args:
+            config: Pre-loaded config dict. If None, loads from config_path.
+            config_path: Path to settings.yaml. If None, uses default location.
+        """
+        if config is None:
+            config = _load_config(config_path)
+
+        vec_cfg = config.get('vectorization', {})
+        neo4j_cfg = config.get('neo4j', {})
+        retrieval_cfg = config.get('retrieval', {})
+
+        qdrant_url = vec_cfg.get('qdrant_url', 'http://localhost:6333')
+        collection = vec_cfg.get('collection_name', 'medical_papers')
+        model_name = vec_cfg.get('model_name', 'BAAI/bge-small-en-v1.5')
+        neo4j_uri = neo4j_cfg.get('uri', 'bolt://localhost:7687')
+        neo4j_user = neo4j_cfg.get('user', 'neo4j')
+        neo4j_password = neo4j_cfg.get('password', 'testpassword')
+
+        self._collection = collection
+        self._default_limit: int = retrieval_cfg.get('default_limit', 3)
+        self._hybrid_search: bool = retrieval_cfg.get('hybrid_search', True)
+
         # 1. Vector Connection
-        self.qdrant = QdrantClient(QDRANT_URL)
-        self.embedder = SentenceTransformer("BAAI/bge-small-en-v1.5")
+        self.qdrant = QdrantClient(qdrant_url)
+        self.embedder = SentenceTransformer(model_name)
         
         # 2. Graph Connection
-        self.driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
+        self.driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
         logger.info("Hybrid Retriever (Vector + Graph) Initialized")
 
-    def search(self, query: str, limit: int = 3) -> List[Dict]:
+    def search(self, query: str, limit: int = None) -> List[Dict]:
         """
         Performs Vector Search, then enriches results with Graph Facts.
+        
+        Args:
+            query: Natural language query string.
+            limit: Number of results. Defaults to retrieval.default_limit from config.
         """
+        if limit is None:
+            limit = self._default_limit
+
         # Step A: Vector Search (The "Wide Net")
         query_vector = self.embedder.encode(query).tolist()
         hits = self.qdrant.query_points(
-            collection_name=COLLECTION,
+            collection_name=self._collection,
             query=query_vector,
             limit=limit
         ).points
@@ -114,7 +150,8 @@ if __name__ == "__main__":
         epilog="Example: python hybrid.py -q 'what is diabetes' -l 5"
     )
     parser.add_argument('-q', '--query', type=str, help='Search query')
-    parser.add_argument('-l', '--limit', type=int, default=3, help='Number of results (default: 3)')
+    parser.add_argument('-l', '--limit', type=int, default=None, help='Number of results (default: retrieval.default_limit from config)')
+    parser.add_argument('-c', '--config', type=str, default=None, help='Path to settings.yaml')
     parser.add_argument('--diagnose', action='store_true', help='Show diagnostic info about Neo4j graph')
     args = parser.parse_args()
     
@@ -131,7 +168,7 @@ if __name__ == "__main__":
             sys.exit(1)
     
     try:
-        retriever = HybridRetriever()
+        retriever = HybridRetriever(config_path=args.config)
         
         # Test Qdrant connection
         try:
