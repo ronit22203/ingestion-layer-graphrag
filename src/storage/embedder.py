@@ -134,6 +134,7 @@ class MedicalVectorizer:
             # Prepare metadata
             metadata = {
                 'source': file_path.name,
+                'content': chunk['content'],
                 'context': chunk['context'],
                 'level': chunk['level'],
                 'chunk_index': i,

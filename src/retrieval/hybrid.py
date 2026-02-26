@@ -72,23 +72,24 @@ class HybridRetriever:
 
         results = []
         for hit in hits:
-            # Step B: Graph Enrichment (The "Magnifying Glass")
-            # We use the 'chunk_id' and 'source' stored in Qdrant metadata
-            # to find the exact triplets in Neo4j.
-            chunk_id = hit.payload.get('chunk_id') # Ensure your ingest pipeline saves this!
-            source = hit.payload.get('source')     # e.g., "Sample-filled-in-MR"
-            
-            # If you didn't save chunk_id in Qdrant, we can fallback to matching text/source
-            # But let's assume we can fetch by Source File for now
+            chunk_id = hit.payload.get('chunk_id')
+            source = hit.payload.get('source')
+            chunk_index = hit.payload.get('chunk_index', 0)
+
             graph_facts = self._fetch_graph_context(source)
-            
+
+            # Prefer content stored in Qdrant; fall back to on-disk chunk file
+            content = hit.payload.get('content')
+            if not content:
+                content = self._load_chunk_content(source, chunk_index)
+
             results.append({
                 "id": hit.id,
                 "score": hit.score,
-                "content": hit.payload.get('content'),
+                "content": content,
                 "source": source,
                 "chunk_id": chunk_id,
-                "chunk_index": hit.payload.get('chunk_index'),
+                "chunk_index": chunk_index,
                 "context": hit.payload.get('context'),
                 "level": hit.payload.get('level'),
                 "page_number": hit.payload.get('page_number'),
@@ -100,43 +101,54 @@ class HybridRetriever:
 
     def _fetch_graph_context(self, source_file: str) -> List[str]:
         """
-        Queries Neo4j for facts related to this document.
-        Extracts entity relationships from the knowledge graph.
+        Queries Neo4j for facts related to this document by source file.
         """
-        if not source_file: 
+        if not source_file:
             return []
-        
+
         try:
             facts = []
-            
             with self.driver.session() as session:
-                # Extract terms from the source filename to match entities in the graph
-                # E.g., "2110.01406v3_cleaned.md" -> search for related entities
-                query = """
-                MATCH (h)-[r]->(t)
-                WHERE h.name CONTAINS 'MEDICAL' OR h.name CONTAINS 'FEDERATED' 
-                   OR t.name CONTAINS 'MEDICAL' OR t.name CONTAINS 'FEDERATED'
-                   OR h.name CONTAINS 'BENCHMARKING' OR t.name CONTAINS 'BENCHMARKING'
-                RETURN h.name, type(r) as relation_type, t.name
-                LIMIT 5
-                """
-                
-                result = session.run(query)
-                records = list(result)
-                
-                if records:
-                    for record in records:
-                        h_name = record.get('h.name', 'Unknown')
-                        rel_type = record.get('relation_type', 'RELATED')
-                        t_name = record.get('t.name', 'Unknown')
-                        fact = f"{h_name} --[{rel_type}]--> {t_name}"
-                        facts.append(fact)
-            
+                result = session.run(
+                    """
+                    MATCH (h)-[r]->(t)
+                    WHERE r.source = $source
+                    RETURN h.name, type(r) AS relation_type, t.name
+                    LIMIT 5
+                    """,
+                    source=source_file,
+                )
+                for record in result:
+                    fact = f"{record['h.name']} --[{record['relation_type']}]--> {record['t.name']}"
+                    facts.append(fact)
             return facts
-        
+
         except Exception as e:
             logger.warning(f"Neo4j query failed: {e}")
             return []
+
+    def _load_chunk_content(self, source_file: str, chunk_index: int) -> Optional[str]:
+        """
+        Fallback: load chunk text from the on-disk chunk JSON when Qdrant
+        payload does not carry a 'content' field (legacy indexed data).
+        """
+        try:
+            project_root = Path(__file__).parent.parent.parent
+            chunks_dir = project_root / "data" / "chunks"
+            # source_file: "nihms-2137905_cleaned.md" -> "nihms-2137905_chunks.json"
+            stem = Path(source_file).stem.replace("_cleaned", "")
+            chunk_file = chunks_dir / f"{stem}_chunks.json"
+            if not chunk_file.exists():
+                return None
+            import json
+            with open(chunk_file) as f:
+                data = json.load(f)
+            chunks = data.get("chunks", [])
+            if 0 <= chunk_index < len(chunks):
+                return chunks[chunk_index].get("content")
+        except Exception as e:
+            logger.warning(f"Could not load chunk content from disk: {e}")
+        return None
 
     def close(self):
         self.driver.close()
