@@ -637,7 +637,7 @@ This is a production pipeline. Modifications should:
 
 ## License
 
-Proprietary - Medical Data Ingestion Pipeline
+MIT - Medical Data Ingestion Pipeline
 
 ---
 
